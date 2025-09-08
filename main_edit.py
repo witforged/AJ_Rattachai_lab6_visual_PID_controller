@@ -1,0 +1,305 @@
+"""
+Visual PID Gimbal Tracker for RoboMaster EP — robust version with debug & fallback
+"""
+
+import cv2
+import numpy as np
+import time
+import csv
+from pathlib import Path
+
+import robomaster
+from robomaster import robot
+
+# ====== Template mask paths ======
+TEMPLATE_PATHS = [
+    r"template/near.png",
+    r"template/mid.png",
+    r"template/far.png",
+]
+
+def clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+def _load_masks_from_paths(paths): # นำเข้า template masks
+    masks = []
+    for p in paths:
+        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE) # อ่านภาพเป็นขาวดำ
+        if img is None:
+            print(f"[ERROR] Cannot load template image at: {p}")
+            continue
+        # ให้เป็น binary 0/255
+        _, binm = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+        masks.append(binm)
+    return masks
+
+_ALL_MASKS = _load_masks_from_paths(TEMPLATE_PATHS)
+
+# ====== Detection params ======
+SCALES = [0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30]
+SCORE_THRESH = 0.35
+DETECT_EVERY_N = 1
+MASK_FLOOR_Y = 600
+EMA_ALPHA = 0.35
+USE_EMA = True
+USE_BLOB_FALLBACK = True
+MIN_BLOB_AREA = 800
+
+MATCH_METHOD = 'CCORR'  # 'CCORR' or 'CCOEFF'
+# วัตถุเป็นทรงชัดๆ ใช้ mask 0/255 → ลอง CCORR ก่อน (เสถียร)
+# ถ้าเจอหลอนจากฉากสว่าง/แสงแกว่ง → สลับเป็น CCOEFF
+
+# ====== HSV ranges ======
+HSV_LOWER1 = (0,   30, 40)
+HSV_UPPER1 = (12, 255,255)
+HSV_LOWER2 = (165, 30, 40)
+HSV_UPPER2 = (180,255,255)
+
+# ====== PID params ======
+KP_YAW,   KI_YAW,   KD_YAW   = 0.12, 0.0001, 0.01 # yaw แก้ไขค่า PID
+KP_PITCH, KI_PITCH, KD_PITCH = 0.12, 0.0001, 0.01 # pitch แก้ไขค่า PID
+SIGN_YAW, SIGN_PITCH = +1, -1
+MAX_SPEED = 250.0 # deg/s
+INT_CLAMP = 30000.0
+
+# ====== Misc ======
+W, H = 1280, 720 # ขนาดเฟรม
+CENTER_X, CENTER_Y = W/2, H/2 # จุดกึ่งกลาง
+
+gimbal_angles = [0.0, 0.0, 0.0, 0.0] # pitch angle, yaw angle, pitch gimbal angle, yaw gimbal angle
+
+class PID:
+    def __init__(self, kp, ki, kd, int_clamp=INT_CLAMP):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.int = 0.0
+        self.prev_e = 0.0
+        self.prev_t = None
+        self.int_clamp = abs(int_clamp)
+        self.d_ema = 0.0
+        self.d_alpha = 0.5
+
+    def reset(self):
+        self.int = 0.0
+        self.prev_e = 0.0
+        self.prev_t = None
+        self.d_ema = 0.0
+
+    def step(self, e, t_now):
+        if self.prev_t is None:
+            self.prev_t = t_now
+            self.prev_e = e
+            return self.kp * e
+        dt = max(1e-3, t_now - self.prev_t)
+        de = (e - self.prev_e) / dt
+        self.d_ema = self.d_alpha * de + (1 - self.d_alpha) * self.d_ema
+        self.int += e * dt
+        self.int = max(-self.int_clamp, min(self.int_clamp, self.int))
+        u = self.kp * e + self.ki * self.int + self.kd * self.d_ema
+        self.prev_e = e
+        self.prev_t = t_now
+        return u
+
+def red_mask_binarize(bgr, floor_y=MASK_FLOOR_Y):
+    m = bgr.copy()
+    if floor_y is not None and 0 <= floor_y < m.shape[0]: # ถ้ามีการกำหนด floor_y ให้ทำการปิดส่วนล่างของภาพ ex. floor_y=600 คือ ปิดท่อนล่าง 120 px
+        m[floor_y:, :] = 0
+    blur = cv2.GaussianBlur(m, (7,7), 0) # Blur ภาพเพื่อลด noise
+    hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV) # แปลงภาพจาก BGR เป็น HSV
+    m1 = cv2.inRange(hsv, np.array(HSV_LOWER1), np.array(HSV_UPPER1)) # สร้าง mask สำหรับช่วงสีแดง (0-12)
+    m2 = cv2.inRange(hsv, np.array(HSV_LOWER2), np.array(HSV_UPPER2)) # สร้าง mask สำหรับช่วงสีแดง (165-180)
+    mask = cv2.bitwise_or(m1, m2)                                         # รวม mask ทั้งสองช่วงเข้าด้วยกัน
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)) # สร้าง kernel สำหรับการทำ morphological operations
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1) # ทำการเปิด (เปิด = ลบ noise เล็กๆ)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1) # ทำการปิด (ปิด = เติมรูเล็กๆ)
+    return mask
+
+def _largest_blob_bbox(binary, area_min=MIN_BLOB_AREA): # เพิ่ม Dynamic ในการหา bounding box ของ กระป๋องโค้ก โดยกำหนดให้หาก้อนสีเเดงที่ใหญ่ที่สุดในภาพ binary เเต่เสี่ยงที่จะเจอเป็นสิ่งอื่นถ้าในภาพมีสีเเดงอื่นด้วยนอกจากกระป๋องโค้ก
+    found = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = found[-2]
+    if not cnts: return None
+
+    c = max(cnts, key=cv2.contourArea) # หา contour ที่มีพื้นที่มากที่สุด
+    if cv2.contourArea(c) < area_min: return None # ถ้าพื้นที่น้อยกว่า area_min ให้คืนค่า None
+    x, y, w, h = cv2.boundingRect(c) # หา bounding box ของ contour ที่ใหญ่ที่สุด
+    return (x, y, x+w, y+h)
+
+def _match_method_const():
+    return cv2.TM_CCORR_NORMED if MATCH_METHOD.upper() == 'CCORR' else cv2.TM_CCOEFF_NORMED
+
+class RedTemplateDetector: # ตรวจจับวัตถุสีแดงโดยใช้ template matching
+    # เก็บพารามิเตอร์สำหรับวนหาคู่แมตช์
+    def __init__(self, templates, scales=SCALES, score_thresh=SCORE_THRESH): # กำหนด template, scales และ score_thresh
+        self.templates = [t.copy() for t in templates] # ทำสำเนาของ template เพื่อป้องกันการเปลี่ยนแปลงต้นฉบับ
+        self.scales = list(scales)  # กำหนดสเกลที่ใช้ในการตรวจจับ
+        self.score_thresh = float(score_thresh) # กำหนดเกณฑ์คะแนนขั้นต่ำสำหรับการยอมรับการตรวจจับ
+        self.last_debug = {} # เก็บข้อมูลสำหรับการ Debug
+
+    # ตรวจจับวัตถุในภาพ BGR
+    def detect(self, bgr):
+        bi = red_mask_binarize(bgr, floor_y=MASK_FLOOR_Y) # สร้าง binary image โดยใช้ mask สีแดง
+        method = _match_method_const() # เลือกวิธีการจับคู่ template (CCORR หรือ CCOEFF)
+        best = (-1.0, None, None, None)  # score เริ่มจาก -1 ต่ำสุด, bbox, tpl_used, scale
+
+        # วนหาคู่แมตช์ที่ดีที่สุด
+        for t in self.templates:
+            t_bin = t
+
+            for s in self.scales:
+                tpl = t_bin if abs(s-1.0) < 1e-6 else cv2.resize(t_bin, None, fx=s, fy=s, interpolation=cv2.INTER_NEAREST) # ปรับขนาด template ตามสเกล
+                # ข้ามถ้า template ใหญ่กว่า binary image
+                if bi.shape[0] < tpl.shape[0] or bi.shape[1] < tpl.shape[1]:
+                    continue
+
+                r = cv2.matchTemplate(bi, tpl, method) # ทำการจับคู่ template กับ binary image
+                _, score, _, max_loc = cv2.minMaxLoc(r) # เอาค่าสูงสุด (ยิ่งสูงยิ่งเหมือน)
+
+                # อัปเดต best ถ้าคะแนนดีกว่า เพื่อเก็บค่าที่ดีที่สุด
+                if score > best[0]: # ถ้าคะแนนดีกว่า best ที่เก็บไว้
+                    x1, y1 = max_loc # ตำแหน่งซ้ายบนของการจับคู่ที่ดีที่สุด
+                    h, w = tpl.shape # ขนาดของ template ที่ใช้
+                    best = (float(score), (x1, y1, x1+w, y1+h), tpl, s) # อัปเดต best
+
+        score, bbox, tpl, sc = best
+        ok = (bbox is not None) and (score >= self.score_thresh)
+        self.last_debug = {
+            "ok": ok, "score": score, "scale": sc, "method": MATCH_METHOD,
+        }
+        if not ok:
+            return None, float(score), self.last_debug
+        return bbox, float(score), self.last_debug
+    
+    @staticmethod
+    def draw_debug(frame, bbox, score, ema_pt, show_guides=True):
+        h, w = frame.shape[:2]
+        cx, cy = int(w/2), int(h/2)
+        if show_guides:
+            cv2.drawMarker(frame, (cx, cy), (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+        if bbox is not None:
+            x1, y1, x2, y2 = map(int, bbox)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            bb_cx, bb_cy = int(0.5*(x1+x2)), int(0.5*(y1+y2))
+            cv2.circle(frame, (bb_cx, bb_cy), 4, (0, 255, 255), -1)
+        if ema_pt is not None:
+            ex, ey = map(int, ema_pt)
+            cv2.circle(frame, (ex, ey), 4, (0, 255, 0), -1)
+        cv2.putText(frame, f"score={score:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200,255,200), 2)
+
+# ====== Main ======
+if __name__ == "__main__":
+
+    slow_mode = False
+    show_guides = True
+    use_floor_mask = True
+    blob_fallback = USE_BLOB_FALLBACK
+
+    ep = robot.Robot()
+    ep.initialize(conn_type="ap")
+    cam = ep.camera
+    gim = ep.gimbal
+
+    # angles sub
+    def _angle_cb(angle_info):  # pitch, yaw, pitch_gimbal, yaw_gimbal
+        gimbal_angles[:] = angle_info
+    gim.sub_angle(freq=50, callback=_angle_cb)
+
+    cam.start_video_stream(display=False)
+    time.sleep(0.6)  # warm up
+
+    detector = RedTemplateDetector(_ALL_MASKS)
+    pid_yaw = PID(KP_YAW, KI_YAW, KD_YAW)
+    pid_pitch = PID(KP_PITCH, KI_PITCH, KD_PITCH)
+    
+    ema_cx, ema_cy = W/2, H/2
+    latest_bbox = None
+    latest_score = 0.0
+    
+    t0 = time.time()
+    rows = []
+
+    try:
+        # ==================================
+        # ======     Main Loop      ======
+        # ==================================
+        while True:
+            t_now = time.time()   
+            frame = cam.read_cv2_image()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            # 1. ตรวจจับวัตถุ
+            bbox, score, dbg_info = detector.detect(frame)
+            latest_score = score
+            
+            # 2. หาจุดศูนย์กลางเป้าหมาย (cx, cy)
+            cx, cy = None, None
+            current_detected_box = None
+            
+            if bbox is not None: # เจอจาก Template Matching
+                x1, y1, x2, y2 = bbox
+                cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+                current_detected_box = bbox
+            elif blob_fallback: # ถ้าไม่เจอ ลองใช้ Fallback
+                bi = red_mask_binarize(frame, floor_y=(MASK_FLOOR_Y if use_floor_mask else None))
+                fb_bbox = _largest_blob_bbox(bi, area_min=MIN_BLOB_AREA)
+                if fb_bbox is not None:
+                    x1, y1, x2, y2 = fb_bbox
+                    cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+                    current_detected_box = fb_bbox
+            
+            latest_bbox = current_detected_box
+            
+            # 3. คำนวณ PID และสั่งงาน Gimbal
+            if latest_bbox is not None and cx is not None:
+                # ใช้ EMA เพื่อให้เป้านิ่งขึ้น
+                if USE_EMA:
+                    ema_cx = EMA_ALPHA * cx + (1 - EMA_ALPHA) * ema_cx
+                    ema_cy = EMA_ALPHA * cy + (1 - EMA_ALPHA) * ema_cy
+                    target_cx, target_cy = ema_cx, ema_cy
+                else:
+                    target_cx, target_cy = cx, cy
+
+                err_x = target_cx - CENTER_X
+                err_y = target_cy - CENTER_Y
+
+                u_yaw = SIGN_YAW * pid_yaw.step(err_x, t_now)
+                u_ptc = SIGN_PITCH * pid_pitch.step(err_y, t_now)
+
+                spd_lim = MAX_SPEED * (0.4 if slow_mode else 1.0)
+                u_yaw = clamp(u_yaw, -spd_lim, spd_lim)
+                u_ptc = clamp(u_ptc, -spd_lim, spd_lim)
+                
+                gim.drive_speed(yaw_speed=u_yaw, pitch_speed=u_ptc)
+
+                # Log data
+                pa, ya, _, _ = gimbal_angles
+                rows.append([t_now - t0, pa, ya, err_x, err_y, u_yaw, u_ptc, latest_score])
+            else:
+                # ถ้าไม่เจอเป้าหมาย ให้หยุดนิ่งและรีเซ็ต PID
+                gim.drive_speed(yaw_speed=0, pitch_speed=0)
+                pid_yaw.reset()
+                pid_pitch.reset()
+
+            # 4. แสดงผล
+            dbg_frame = frame.copy()
+            ema_pt = (ema_cx, ema_cy) if latest_bbox is not None and USE_EMA else None
+            RedTemplateDetector.draw_debug(dbg_frame, latest_bbox, latest_score, ema_pt, show_guides)
+            cv2.imshow("Visual PID Gimbal Tracker", dbg_frame)
+
+    finally:
+        cv2.destroyAllWindows()
+        cam.stop_video_stream()
+        gim.drive_speed(yaw_speed=0, pitch_speed=0) # สั่งให้หยุดก่อนปิด
+        gim.unsub_angle()
+        ep.close()
+
+        # Save CSV
+        out = Path("gimbal_response.csv")
+        try:
+            with out.open('w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(["t","pitch_angle","yaw_angle","err_x_px","err_y_px","u_yaw_dps","u_pitch_dps","score"])
+                w.writerows(rows)
+            print(f"[LOG] Saved {len(rows)} samples → {out.resolve()}")
+        except Exception as e:
+            print(f"[WARN] CSV not saved: {e}")
