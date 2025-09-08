@@ -1,0 +1,314 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+def load_gimbal_data(csv_path="gimbal_response_extended.csv"):
+    """Load gimbal data from CSV file"""
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"Loaded {len(df)} data points from {csv_path}")
+        return df
+    except FileNotFoundError:
+        print(f"Error: CSV file '{csv_path}' not found!")
+        return None
+    except Exception as e:
+        print(f"Error loading CSV: {e}")
+        return None
+
+def plot_errors(df):
+    """Plot error signals over time"""
+    plt.figure(figsize=(12, 8))
+    
+    # Error plots
+    plt.subplot(2, 2, 1)
+    plt.plot(df['time'], df['err_total'], 'r-', label='Total Error', linewidth=2)
+    plt.plot(df['time'], df['err_x'], 'b--', label='X Error', alpha=0.7)
+    plt.plot(df['time'], df['err_y'], 'g--', label='Y Error', alpha=0.7)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Error (pixels)')
+    plt.title('Error Signals vs Time')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Individual error components
+    plt.subplot(2, 2, 2)
+    plt.plot(df['time'], df['err_x'], 'b-', label='X Error')
+    plt.xlabel('Time (s)')
+    plt.ylabel('X Error (pixels)')
+    plt.title('X-axis Error vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 2, 3)
+    plt.plot(df['time'], df['err_y'], 'g-', label='Y Error')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Y Error (pixels)')
+    plt.title('Y-axis Error vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 2, 4)
+    plt.plot(df['time'], df['err_total'], 'r-', label='Total Error')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Total Error (pixels)')
+    plt.title('Total Error vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_errors.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def plot_accumulated_errors(df):
+    """Plot accumulated error signals over time"""
+    plt.figure(figsize=(12, 8))
+    
+    plt.subplot(2, 2, 1)
+    plt.plot(df['time'], df['accumulate_err_total'], 'r-', linewidth=2, label='Total Accumulated Error')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Accumulated Error (pixel·s)')
+    plt.title('Accumulated Total Error vs Time')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.subplot(2, 2, 2)
+    plt.plot(df['time'], df['accumulate_err_x'], 'b-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Accumulated X Error (pixel·s)')
+    plt.title('Accumulated X Error vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 2, 3)
+    plt.plot(df['time'], df['accumulate_err_y'], 'g-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Accumulated Y Error (pixel·s)')
+    plt.title('Accumulated Y Error vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 2, 4)
+    plt.plot(df['time'], df['accumulate_err_x'], 'b-', label='X Accumulated', alpha=0.8)
+    plt.plot(df['time'], df['accumulate_err_y'], 'g-', label='Y Accumulated', alpha=0.8)
+    plt.plot(df['time'], df['accumulate_err_total'], 'r-', label='Total Accumulated', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Accumulated Error (pixel·s)')
+    plt.title('All Accumulated Errors vs Time')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_accumulated_errors.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def plot_controller_outputs(df):
+    """Plot controller output signals over time"""
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(df['time'], df['controller_output_x'], 'b-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Controller Output X (deg/s)')
+    plt.title('Yaw Controller Output vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(df['time'], df['controller_output_y'], 'g-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Controller Output Y (deg/s)')
+    plt.title('Pitch Controller Output vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_controller_outputs.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def plot_gimbal_angles(df):
+    """Plot gimbal angle positions over time"""
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(df['time'], df['yaw_angle'], 'b-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Yaw Angle (deg)')
+    plt.title('Gimbal Yaw Angle vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(df['time'], df['pitch_angle'], 'g-', linewidth=2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Pitch Angle (deg)')
+    plt.title('Gimbal Pitch Angle vs Time')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_angles.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def plot_comprehensive_analysis(df):
+    """Comprehensive analysis with multiple subplots"""
+    fig, axes = plt.subplots(3, 3, figsize=(16, 12))
+    
+    # Row 1: Errors
+    axes[0,0].plot(df['time'], df['err_total'], 'r-', linewidth=2)
+    axes[0,0].set_title('Total Error')
+    axes[0,0].set_ylabel('Error (pixels)')
+    axes[0,0].grid(True, alpha=0.3)
+    
+    axes[0,1].plot(df['time'], df['err_x'], 'b-', linewidth=2)
+    axes[0,1].set_title('X Error')
+    axes[0,1].set_ylabel('X Error (pixels)')
+    axes[0,1].grid(True, alpha=0.3)
+    
+    axes[0,2].plot(df['time'], df['err_y'], 'g-', linewidth=2)
+    axes[0,2].set_title('Y Error')
+    axes[0,2].set_ylabel('Y Error (pixels)')
+    axes[0,2].grid(True, alpha=0.3)
+    
+    # Row 2: Accumulated Errors
+    axes[1,0].plot(df['time'], df['accumulate_err_total'], 'r-', linewidth=2)
+    axes[1,0].set_title('Accumulated Total Error')
+    axes[1,0].set_ylabel('Acc. Error (pixel·s)')
+    axes[1,0].grid(True, alpha=0.3)
+    
+    axes[1,1].plot(df['time'], df['accumulate_err_x'], 'b-', linewidth=2)
+    axes[1,1].set_title('Accumulated X Error')
+    axes[1,1].set_ylabel('Acc. X Error (pixel·s)')
+    axes[1,1].grid(True, alpha=0.3)
+    
+    axes[1,2].plot(df['time'], df['accumulate_err_y'], 'g-', linewidth=2)
+    axes[1,2].set_title('Accumulated Y Error')
+    axes[1,2].set_ylabel('Acc. Y Error (pixel·s)')
+    axes[1,2].grid(True, alpha=0.3)
+    
+    # Row 3: Controller Outputs and Angles
+    axes[2,0].plot(df['time'], df['controller_output_x'], 'b-', linewidth=2)
+    axes[2,0].set_title('Yaw Controller Output')
+    axes[2,0].set_ylabel('Output X (deg/s)')
+    axes[2,0].set_xlabel('Time (s)')
+    axes[2,0].grid(True, alpha=0.3)
+    
+    axes[2,1].plot(df['time'], df['controller_output_y'], 'g-', linewidth=2)
+    axes[2,1].set_title('Pitch Controller Output')
+    axes[2,1].set_ylabel('Output Y (deg/s)')
+    axes[2,1].set_xlabel('Time (s)')
+    axes[2,1].grid(True, alpha=0.3)
+    
+    # Combined angles plot
+    ax_angles = axes[2,2]
+    ax_angles.plot(df['time'], df['yaw_angle'], 'b-', linewidth=2, label='Yaw')
+    ax_angles.plot(df['time'], df['pitch_angle'], 'g-', linewidth=2, label='Pitch')
+    ax_angles.set_title('Gimbal Angles')
+    ax_angles.set_ylabel('Angle (deg)')
+    ax_angles.set_xlabel('Time (s)')
+    ax_angles.legend()
+    ax_angles.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_comprehensive_analysis.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def plot_performance_metrics(df):
+    """Plot performance metrics and statistics"""
+    plt.figure(figsize=(14, 10))
+    
+    # Calculate performance metrics
+    rmse_x = np.sqrt(np.mean(df['err_x']**2))
+    rmse_y = np.sqrt(np.mean(df['err_y']**2))
+    rmse_total = np.sqrt(np.mean(df['err_total']**2))
+    
+    # Subplot 1: Error distribution
+    plt.subplot(2, 3, 1)
+    plt.hist(df['err_x'], bins=30, alpha=0.7, color='blue', label=f'X Error (RMSE: {rmse_x:.2f})')
+    plt.xlabel('X Error (pixels)')
+    plt.ylabel('Frequency')
+    plt.title('X Error Distribution')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 3, 2)
+    plt.hist(df['err_y'], bins=30, alpha=0.7, color='green', label=f'Y Error (RMSE: {rmse_y:.2f})')
+    plt.xlabel('Y Error (pixels)')
+    plt.ylabel('Frequency')
+    plt.title('Y Error Distribution')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 3, 3)
+    plt.hist(df['err_total'], bins=30, alpha=0.7, color='red', label=f'Total Error (RMSE: {rmse_total:.2f})')
+    plt.xlabel('Total Error (pixels)')
+    plt.ylabel('Frequency')
+    plt.title('Total Error Distribution')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Subplot 2: Control effort
+    plt.subplot(2, 3, 4)
+    plt.plot(df['time'], np.abs(df['controller_output_x']), 'b-', alpha=0.7)
+    plt.xlabel('Time (s)')
+    plt.ylabel('|Control Output X| (deg/s)')
+    plt.title('Yaw Control Effort')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 3, 5)
+    plt.plot(df['time'], np.abs(df['controller_output_y']), 'g-', alpha=0.7)
+    plt.xlabel('Time (s)')
+    plt.ylabel('|Control Output Y| (deg/s)')
+    plt.title('Pitch Control Effort')
+    plt.grid(True, alpha=0.3)
+    
+    # Subplot 3: Error vs Control Output (Phase plot)
+    plt.subplot(2, 3, 6)
+    plt.scatter(df['err_x'], df['controller_output_x'], alpha=0.5, s=10, c='blue', label='X axis')
+    plt.scatter(df['err_y'], df['controller_output_y'], alpha=0.5, s=10, c='green', label='Y axis')
+    plt.xlabel('Error (pixels)')
+    plt.ylabel('Control Output (deg/s)')
+    plt.title('Error vs Control Output')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('gimbal_performance_metrics.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # Print statistics
+    print("\n=== PERFORMANCE STATISTICS ===")
+    print(f"X Error - Mean: {df['err_x'].mean():.2f}, Std: {df['err_x'].std():.2f}, RMSE: {rmse_x:.2f}")
+    print(f"Y Error - Mean: {df['err_y'].mean():.2f}, Std: {df['err_y'].std():.2f}, RMSE: {rmse_y:.2f}")
+    print(f"Total Error - Mean: {df['err_total'].mean():.2f}, Std: {df['err_total'].std():.2f}, RMSE: {rmse_total:.2f}")
+    print(f"Max Controller Output X: {df['controller_output_x'].abs().max():.2f} deg/s")
+    print(f"Max Controller Output Y: {df['controller_output_y'].abs().max():.2f} deg/s")
+    print(f"Final Accumulated Total Error: {df['accumulate_err_total'].iloc[-1]:.2f} pixel·s")
+
+def main():
+    """Main function to run all analysis"""
+    # Load data
+    df = load_gimbal_data()
+    if df is None:
+        return
+    
+    print(f"Data columns: {list(df.columns)}")
+    print(f"Data shape: {df.shape}")
+    print(f"Time range: {df['time'].min():.2f} - {df['time'].max():.2f} seconds")
+    
+    # Create all plots
+    print("\nGenerating plots...")
+    
+    plot_errors(df)
+    print("✓ Error plots generated")
+    
+    plot_accumulated_errors(df)
+    print("✓ Accumulated error plots generated")
+    
+    plot_controller_outputs(df)
+    print("✓ Controller output plots generated")
+    
+    plot_gimbal_angles(df)
+    print("✓ Gimbal angle plots generated")
+    
+    plot_comprehensive_analysis(df)
+    print("✓ Comprehensive analysis plot generated")
+    
+    plot_performance_metrics(df)
+    print("✓ Performance metrics plots generated")
+    
+    print("\nAll plots have been generated and saved as PNG files!")
+
+if __name__ == "__main__":
+    main()
