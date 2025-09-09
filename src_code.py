@@ -188,8 +188,3 @@ if __name__ == "__main__":
     plt.plot(x_point, y_point7)
     plt.legend(["e x", "e y", "u x", "u y"])
     plt.show()
-
-
-
-
-อธิบายโค้ดนี้เเบบละเอียด
