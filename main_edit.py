@@ -8,29 +8,25 @@ import robomaster
 from robomaster import robot
 from robomaster import vision
 
-# ===================== Config (ปรับได้) =====================
+
 # ====== Template mask paths ======
-TEMPLATE_PATHS = [
-    r"C:\Users\snpdp\Desktop\AIE 2_1\Robot\Aj_Rattachai\Vision_and_Image_processing\Lab6_Visual_PID_Controllor\template\Screenshot 2025-09-12 174407.png",
+TEMPLATE_PATHS = [r"C:\Users\snpdp\Desktop\AIE 2_1\Robot\Aj_Rattachai\Vision_and_Image_processing\Lab6_Visual_PID_Controllor\template\Coke Can.png",
 ]
 
 # ====== Detection params ======
-SCALES = [0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30]   # ลองหลาย scale ของ template เพื่อรับมือระยะใกล้/ไกล
-SCORE_THRESH = 0.50                                  # เกณฑ์รับผลจับคู่จาก template (ยิ่งสูงยิ่งเข้มงวด)
-MASK_FLOOR_Y = None                                     # ปิดส่วนล่างของภาพ (พรม/พื้น) เพื่อลดสัญญาณรบกวน
+SCORE_THRESH = 0.30
+MASK_FLOOR_Y = 600
 
 # ====== Smoothing / EMA ======
-USE_EMA = True                                         # เปิดใช้ EMA ให้ตำแหน่งเป้านิ่งขึ้น
-EMA_ALPHA = 0.35                                       # ค่าน้ำหนัก EMA (สูง = ตามไวขึ้น แต่นิ่งน้อยลง)
+USE_EMA = True
+EMA_ALPHA = 0.35
 
 # ====== Fallback flags ======
-USE_BLOB_FALLBACK = False                               # ถ้าไม่เจอทั้ง marker/template ให้ลองหาก้อนสีแดงที่ใหญ่สุด
-MIN_BLOB_AREA = 800                                    # พื้นที่ขั้นต่ำของ blob ที่จะยอมรับ
+USE_BLOB_FALLBACK = False
+MIN_BLOB_AREA = 800
 
 # ====== Template matching method ======
-MATCH_METHOD = 'CCORR'  # 'CCORR' or 'CCOEFF'
-# วัตถุเป็นทรงชัดๆ ใช้ mask 0/255 → ลอง CCORR ก่อน (เสถียร)
-# ถ้าเจอหลอนจากฉากสว่าง/แสงแกว่ง → สลับเป็น CCOEFF
+MATCH_METHOD = 'CCORR'
 
 # ====== HSV ranges (สีแดง) ======
 HSV_LOWER1 = (0,   30, 40)
@@ -39,57 +35,51 @@ HSV_LOWER2 = (165, 30, 40)
 HSV_UPPER2 = (180,255,255)
 
 # ====== PID params ======
-KP_YAW,   KI_YAW,   KD_YAW   = 0.18, 0.0001, 0.01     # yaw แก้ไขค่า PID
-KP_PITCH, KI_PITCH, KD_PITCH = 0.18, 0.0001, 0.01     # pitch แก้ไขค่า PID
-SIGN_YAW, SIGN_PITCH = +1, -1                          # ทิศสัญญาณให้ match กับ ep_gimbal.drive_speed 
-MAX_SPEED = 250.0                                      # deg/s จำกัดความเร็ว gimbal
-INT_CLAMP = 30000.0                                    # anti-windup จำกัดอินทิกรัล
+KP_YAW,   KI_YAW,   KD_YAW   = 0.18, 0.0001, 0.01
+KP_PITCH, KI_PITCH, KD_PITCH = 0.18, 0.0001, 0.01
+SIGN_YAW, SIGN_PITCH = +1, -1
+MAX_SPEED = 250.0
+INT_CLAMP = 30000.0
 
 # ====== Misc ======
-W, H = 1280, 720                                       # ขนาดเฟรม
-CENTER_X, CENTER_Y = W/2, H/2                          # จุดกึ่งกลางภาพ (พิกเซล)
+W, H = 1280, 720
+CENTER_X, CENTER_Y = W/2, H/2
+# <-- ADDED: Minimum contour area to be considered a valid target
+MIN_CONTOUR_AREA = 100
 
-# มุมกิมบอล (จาก callback)  pitch, yaw, pitch_ground, yaw_ground
 gimbal_angles = [0.0, 0.0, 0.0, 0.0]
 
 # ===================== Utils =====================
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
-def _load_masks_from_paths(paths): # นำเข้า template masks
+def _load_masks_from_paths(paths):
     masks = []
     for p in paths:
-        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE) # อ่านภาพเป็นขาวดำ
-        # ให้เป็น binary 0/255
-        _, binm = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
+        img = cv2.imread(p, cv2.IMREAD_COLOR)
+        binm = red_mask_binarize(img, floor_y=None)
         masks.append(binm)
     return masks
 
-def _match_method_const(): # คืนค่า flag ให้ cv2.matchTemplate
+def _match_method_const():
     return cv2.TM_CCORR_NORMED if MATCH_METHOD.upper() == 'CCORR' else cv2.TM_CCOEFF_NORMED
 
 def red_mask_binarize(bgr, floor_y=MASK_FLOOR_Y):
-    """
-    สร้าง binary mask โทนแดงจากภาพ BGR:
-      1) ปิดท่อนล่าง (ลดผลจากพื้น)
-      2) Blur ลด noise
-      3) แปลงเป็น HSV + คัดช่วงแดง 2 ช่วง
-      4) เปิด-ปิด morphology ให้ก้อนเรียบขึ้น
-    """
     m = bgr.copy()
-    if floor_y is not None and 0 <= floor_y < m.shape[0]: # ถ้ากำหนด floor_y → ปิดท่อนล่าง
+    if floor_y is not None and 0 <= floor_y < m.shape[0]:
         m[floor_y:, :] = 0
-    blur = cv2.GaussianBlur(m, (7,7), 0) # เบลอเพื่อลด noise
-    hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV) # BGR -> HSV
-    m1 = cv2.inRange(hsv, np.array(HSV_LOWER1), np.array(HSV_UPPER1)) # mask แดงช่วงที่ 1
-    m2 = cv2.inRange(hsv, np.array(HSV_LOWER2), np.array(HSV_UPPER2)) # mask แดงช่วงที่ 2
-    mask = cv2.bitwise_or(m1, m2) # รวมสองช่วง
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)) # kernel ทรงวงรี
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1) # เปิด = ลบ noise เล็กๆ
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1) # ปิด = เติมรูพรุนเล็กๆ
+    blur = cv2.GaussianBlur(m, (7,7), 0)
+    hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+    # --------------------
+    m1 = cv2.inRange(hsv, np.array(HSV_LOWER1), np.array(HSV_UPPER1))
+    m2 = cv2.inRange(hsv, np.array(HSV_LOWER2), np.array(HSV_UPPER2))
+    mask = cv2.bitwise_or(m1, m2)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
     return mask
 
-def _largest_blob_bbox(binary, area_min=MIN_BLOB_AREA): # หา bbox ของก้อนแดงใหญ่สุด (เป็น fallback ที่เสี่ยงเจอสิ่งอื่นสีแดง)
+def _largest_blob_bbox(binary, area_min=MIN_BLOB_AREA):
     found = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = found[-2]
     if not cnts: return None
@@ -98,95 +88,75 @@ def _largest_blob_bbox(binary, area_min=MIN_BLOB_AREA): # หา bbox ของ�
     x, y, w, h = cv2.boundingRect(c)
     return (x, y, x+w, y+h)
 
-# ===================== Template-Matching Detector =====================
-class RedTemplateDetector: # ตรวจจับวัตถุสีแดงโดยใช้ template matching
-    # เก็บพารามิเตอร์สำหรับวนหาคู่แมตช์
-    def __init__(self, templates, scales=SCALES, score_thresh=SCORE_THRESH): # กำหนด template, scales และ score_thresh
-        self.templates = [t.copy() for t in templates] # ทำสำเนาของ template เพื่อป้องกันการเปลี่ยนแปลงต้นฉบับ
-        self.coarse_scales = list(scales)              # << เปลี่ยนชื่อ scales เดิมเป็น coarse_scales
-        self.score_thresh = float(score_thresh)        # เกณฑ์คะแนนขั้นต่ำสำหรับการยอมรับการตรวจจับ
-        self.last_debug = {}                           # เก็บข้อมูลสำหรับการ Debug
+# ===================== Template-Matching Detector (IMPROVED WITH IMAGE PYRAMID) =====================
+class RedTemplateDetector:
+    def __init__(self, templates, score_thresh=SCORE_THRESH):
+        if not templates:
+            self.template = None
+        else:
+            self.template = templates[0].copy()
+        self.score_thresh = float(score_thresh)
+        self.last_debug = {}
 
-    # ตรวจจับวัตถุในภาพ BGR (เวอร์ชันอัปเกรด Coarse-to-Fine)
-    def detect(self, bgr):
+    def detect(self, bgr, pyramid_scale=1.5, min_size=(40, 40)):
+        if self.template is None:
+            return None, 0.0, {}
+            
         bi = red_mask_binarize(bgr, floor_y=MASK_FLOOR_Y)
         method = _match_method_const()
-        
-        # === 🚀 รอบที่ 1: ค้นหาแบบหยาบ (Coarse Search) เพื่อหาช่วงสเกลที่ดีที่สุด ===
-        best_coarse = (-1.0, None, None) # (score, scale, template)
-        
-        for tpl_base in self.templates:
-            for s in self.coarse_scales:
-                # ปรับขนาด template ตามสเกลหยาบ
-                tpl = tpl_base if abs(s-1.0) < 1e-6 else cv2.resize(tpl_base, None, fx=s, fy=s, interpolation=cv2.INTER_NEAREST)
-                
-                if bi.shape[0] < tpl.shape[0] or bi.shape[1] < tpl.shape[1]:
-                    continue
-                    
-                res = cv2.matchTemplate(bi, tpl, method)
-                _, score, _, _ = cv2.minMaxLoc(res)
-                
-                # เก็บค่าที่ดีที่สุดของรอบหยาบ
-                if score > best_coarse[0]:
-                    best_coarse = (score, s, tpl_base)
+        best_match = (-1.0, None, 1.0)
+        tpl_h, tpl_w = self.template.shape[:2]
+        current_image = bi
+        current_scale = 1.0
 
-        _, best_s_coarse, best_t_base = best_coarse
-        
-        # ถ้าไม่เจออะไรเลยในรอบแรก ให้จบการทำงาน
-        if best_s_coarse is None:
-            self.last_debug = {"ok": False, "score": -1.0, "scale": None, "method": MATCH_METHOD}
-            return None, -1.0, self.last_debug
+        while True:
+            if current_image.shape[0] < tpl_h or current_image.shape[1] < tpl_w:
+                break
 
-        # === 🎯 รอบที่ 2: ค้นหาแบบละเอียด (Fine Search) รอบๆ ผลลัพธ์ที่ดีที่สุด ===
-        # สร้างช่วงการค้นหาที่ละเอียดรอบๆ สเกลที่ดีที่สุดจากรอบแรก
-        fine_scales = np.arange(best_s_coarse - 0.05, best_s_coarse + 0.06, 0.01)
-
-        best_fine = (-1.0, None, None, None) # (score, bbox, tpl_used, scale)
-        
-        for s in fine_scales:
-            # ปรับขนาด template จาก template ดั้งเดิมที่ดีที่สุด ด้วยสเกลที่ละเอียด
-            tpl = best_t_base if abs(s-1.0) < 1e-6 else cv2.resize(best_t_base, None, fx=s, fy=s, interpolation=cv2.INTER_NEAREST)
-            
-            if bi.shape[0] < tpl.shape[0] or bi.shape[1] < tpl.shape[1]:
-                continue
-                
-            res = cv2.matchTemplate(bi, tpl, method)
+            res = cv2.matchTemplate(current_image, self.template, method)
             _, score, _, max_loc = cv2.minMaxLoc(res)
-            
-            # อัปเดต best_fine ถ้าเจอ score ที่ดีกว่าในรอบละเอียด
-            if score > best_fine[0]:
-                h, w = tpl.shape
-                bbox = (max_loc[0], max_loc[1], max_loc[0] + w, max_loc[1] + h)
-                best_fine = (float(score), bbox, tpl, s)
 
-        # ผลลัพธ์สุดท้ายคือค่าที่ดีที่สุดจากรอบละเอียด
-        final_score, final_bbox, _, final_scale = best_fine
-        
+            if score > best_match[0]:
+                x1 = int(max_loc[0] * current_scale)
+                y1 = int(max_loc[1] * current_scale)
+                x2 = int((max_loc[0] + tpl_w) * current_scale)
+                y2 = int((max_loc[1] + tpl_h) * current_scale)
+                best_match = (score, (x1, y1, x2, y2), current_scale)
+
+            if current_image.shape[0] < min_size[1] or current_image.shape[1] < min_size[0]:
+                break
+
+            new_width = int(current_image.shape[1] / pyramid_scale)
+            new_height = int(current_image.shape[0] / pyramid_scale)
+            if new_width > 0 and new_height > 0:
+                 current_image = cv2.resize(current_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            else:
+                 break
+            current_scale *= pyramid_scale
+
+        final_score, final_bbox, final_scale = best_match
         ok = (final_bbox is not None) and (final_score >= self.score_thresh)
         self.last_debug = {"ok": ok, "score": final_score, "scale": final_scale, "method": MATCH_METHOD}
-        
+
         if not ok:
             return None, final_score, self.last_debug
-            
+
         return final_bbox, final_score, self.last_debug
 
     @staticmethod
     def draw_debug(frame, bbox, score, ema_pt, show_guides=True, label=""):
-        """
-        วาด crosshair กลางภาพ + bbox + จุด EMA (เขียว) + ข้อความ debug
-        """
         h, w = frame.shape[:2]
         cx, cy = int(w/2), int(h/2)
         if show_guides:
-            cv2.drawMarker(frame, (cx, cy), (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2) # จุดกึ่งกลางจอ
+            cv2.drawMarker(frame, (cx, cy), (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
         if bbox is not None:
             x1, y1, x2, y2 = map(int, bbox)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2) # กรอบเป้า (เหลือง)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
             bb_cx, bb_cy = int(0.5*(x1+x2)), int(0.5*(y1+y2))
-            cv2.circle(frame, (bb_cx, bb_cy), 4, (0, 255, 255), -1)    # จุดกึ่งกลางกรอบ
+            cv2.circle(frame, (bb_cx, bb_cy), 4, (0, 255, 255), -1)
         if ema_pt is not None:
             ex, ey = map(int, ema_pt)
-            cv2.circle(frame, (ex, ey), 4, (0, 255, 0), -1)            # จุด EMA (เขียว)
+            cv2.circle(frame, (ex, ey), 4, (0, 255, 0), -1)
         if label:
             cv2.putText(frame, label, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,255,200), 2)
         cv2.putText(frame, f"score={score:.2f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,255,200), 2)
@@ -195,250 +165,165 @@ class RedTemplateDetector: # ตรวจจับวัตถุสีแดง
 class PID:
     def __init__(self, kp, ki, kd, int_clamp=INT_CLAMP):
         self.kp, self.ki, self.kd = kp, ki, kd
-        self.int = 0.0                 # สะสมอินทิกรัล
-        self.prev_e = 0.0              # error ก่อนหน้า
-        self.prev_t = None             # เวลาอ่านก่อนหน้า
-        self.int_clamp = abs(int_clamp)# ขอบเขต anti-windup
-        self.d_ema = 0.0               # ค่า derivative ที่กรองด้วย EMA
-        self.d_alpha = 0.5             # น้ำหนัก EMA สำหรับอนุพันธ์
+        self.int = 0.0
+        self.prev_e = 0.0
+        self.prev_t = None
+        self.int_clamp = abs(int_clamp)
+        self.d_ema = 0.0
+        self.d_alpha = 0.5
 
-    def reset(self):                   # รีเซ็ตสถานะ PID เมื่อเป้า “หาย”
+    def reset(self):
         self.int = 0.0
         self.prev_e = 0.0
         self.prev_t = None
         self.d_ema = 0.0
 
     def step(self, e, t_now):
-        """
-        คำนวณ u = Kp*e + Ki*∫e dt + Kd*d(e)/dt (แต่ d(e)/dt ผ่าน EMA เพื่อลด noise)
-        """
-        if self.prev_t is None:        # รอบแรก → ยังไม่มี dt ใช้ P อย่างเดียว
+        if self.prev_t is None:
             self.prev_t = t_now
             self.prev_e = e
             return self.kp * e
-        dt = max(1e-3, t_now - self.prev_t)  # กัน dt == 0
+        dt = max(1e-3, t_now - self.prev_t)
         de = (e - self.prev_e) / dt
-        self.d_ema = self.d_alpha * de + (1 - self.d_alpha) * self.d_ema  # derivative smoothing
-        self.int += e * dt
-        # anti-windup
-        self.int = max(-self.int_clamp, min(self.int_clamp, self.int))
-        # PID output
+        self.d_ema = self.d_alpha * de + (1 - self.d_alpha) * self.d_ema
+        self.int = clamp(self.int + e * dt, -self.int_clamp, self.int_clamp)
         u = self.kp * e + self.ki * self.int + self.kd * self.d_ema
-        # เก็บสถานะไว้ใช้รอบถัดไป
         self.prev_e = e
         self.prev_t = t_now
         return u
 
 # ===================== Marker SDK glue =====================
 class MarkerInfo:
-    """
-    โครงข้อมูล marker จาก SDK (x,y,w,h ∈ [0,1] อิงขนาดภาพ), พร้อม helper ให้เป็นพิกเซล
-    """
     def __init__(self, x, y, w, h, info):
         self._x, self._y, self._w, self._h, self._info = x, y, w, h, info
     @property
-    def pt1(self):
-        return int((self._x - self._w / 2) * 1280), int((self._y - self._h / 2) * 720)
+    def center(self): return int(self._x * W), int(self._y * H)
     @property
-    def pt2(self):
-        return int((self._x + self._w / 2) * 1280), int((self._y + self._h / 2) * 720)
+    def pt1(self): return int((self._x - self._w / 2) * W), int((self._y - self._h / 2) * H)
     @property
-    def center(self):
-        return int(self._x * 1280), int(self._y * 720)
+    def pt2(self): return int((self._x + self._w / 2) * W), int((self._y + self._h / 2) * H)
     @property
-    def text(self):
-        return self._info
+    def text(self): return self._info
 
-markers = []  # เก็บ marker ล่าสุดจาก SDK
-
+markers = []
 def on_detect_marker(marker_info):
-    """
-    callback จาก ep_vision: รับ list ของ marker (x,y,w,h,info) → แปลงเก็บเป็น MarkerInfo
-    """
-    number = len(marker_info)
-    markers.clear()
-    for i in range(number):
-        x, y, w, h, info = marker_info[i]
-        markers.append(MarkerInfo(x, y, w, h, info))  # x,y,w,h ∈ [0,1]
-
-def sub_angle_cb(angle_info):
-    """
-    callback มุมกิมบอล: pitch, yaw, pitch_ground, yaw_ground
-    เก็บลง global เพื่อ log
-    """
-    gimbal_angles[:] = angle_info
+    markers.clear(); markers.extend([MarkerInfo(x, y, w, h, info) for x, y, w, h, info in marker_info])
+def sub_angle_cb(angle_info): gimbal_angles[:] = angle_info
 
 def distant_by_cammara(px_x,px_y):
-    Kx = 741.176
-    Ky = 669.796
-    zx = Kx*5.1/px_x
-    zy = Ky*5.1/px_y
-    z = (zx**2 + zy**2)**0.5
-    return z
+    if px_x == 0 or px_y == 0: return 0
+    Kx, Ky = 741.176, 669.796
+    # Make sure this '5.1' is the real-world width/height of your target in cm
+    REAL_OBJECT_SIZE_CM = 5.1
+    zx = Kx * REAL_OBJECT_SIZE_CM / px_x; zy = Ky * REAL_OBJECT_SIZE_CM / px_y
+    return (zx**2 + zy**2)**0.5
 
 # ===================== Main =====================
 if __name__ == "__main__":
-    # โหลด template (ถ้ามีไฟล์)
     _ALL_MASKS = _load_masks_from_paths(TEMPLATE_PATHS)
-    detector = RedTemplateDetector(_ALL_MASKS) if len(_ALL_MASKS) > 0 else None
+    detector = RedTemplateDetector(_ALL_MASKS) if _ALL_MASKS else None
 
-    ep = robot.Robot()
-    ep.initialize(conn_type="ap")
+    ep = robot.Robot(); ep.initialize(conn_type="ap")
+    cam, gim, ep_vision = ep.camera, ep.gimbal, ep.vision
+    cam.start_video_stream(display=False)
+    gim.sub_angle(freq=50, callback=sub_angle_cb)
+    ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
+    gim.recenter(pitch_speed=200, yaw_speed=200).wait_for_completed()
 
-    cam = ep.camera
-    gim = ep.gimbal
-    ep_vision = ep.vision      
-
-    # เริ่มสตรีม + subscribe callbacks
-    cam.start_video_stream(display=False)                         # เปิดวิดีโอ (ไม่ต้องโชว์หน้าต่างจาก SDK)
-    gim.sub_angle(freq=50, callback=sub_angle_cb)                 # รับค่ามุมกิมบอลที่ 50Hz
-    ep_vision.sub_detect_info(name="marker", callback=on_detect_marker) # เปิดตรวจจับ marker โดย SDK
-    gim.recenter(pitch_speed=200, yaw_speed=200).wait_for_completed()   # รีเซ็นเตอร์ก่อนเริ่ม
-
-    # สร้าง PID สองแกน
-    pid_yaw = PID(KP_YAW, KI_YAW, KD_YAW)
-    pid_pitch = PID(KP_PITCH, KI_PITCH, KD_PITCH)
-
-    # ตัวแปรสถานะสำหรับ EMA และ Debug
+    pid_yaw, pid_pitch = PID(KP_YAW, KI_YAW, KD_YAW), PID(KP_PITCH, KI_PITCH, KD_PITCH)
     ema_cx, ema_cy = CENTER_X, CENTER_Y
-    latest_bbox = None
-    latest_score = 0.0
-    latest_src = "-"   # "marker" | "template" | "blob"
-
-    # เตรียม log CSV
-    rows = []
-    t0 = time.time()
+    latest_bbox, latest_score, latest_src = None, 0.0, "-"
+    rows, t0 = [], time.time()
 
     try:
-        # ==================================
-# ======     Main Loop         ======
-# ==================================
         while True:
-            t_now = time.time()
-            frame = cam.read_cv2_image(strategy="newest", timeout=0.3)
-            if frame is None:
-                time.sleep(0.01)
-                continue
+            t_now, frame = time.time(), cam.read_cv2_image(strategy="newest", timeout=0.3)
+            if frame is None: time.sleep(0.01); continue
 
-            # 1) ตรวจจับเป้า: ใช้ Template Matching เป็นหลัก → Marker SDK
-            cx, cy = None, None
-            bbox = None
-            score = 0.0
-            src = "-"
-            dist = 0.0 # << เพิ่มตัวแปร dist ไว้เก็บระยะ
+            cx, cy, bbox, score, src, dist = None, None, None, 0.0, "-", 0.0
+            
+            # <-- ADDED: Binarize the whole frame once at the beginning of the loop
+            binary_mask = red_mask_binarize(frame)
 
-            # 1A) Primary: Template Matching (ย้ายมาเป็นลำดับแรก)
-            if detector is not None:
+            if detector:
+                # Use template matching to find a ROUGH location (Region of Interest)
                 tbbox, tscore, _ = detector.detect(frame)
-                if tbbox is not None:
+                
+                # <-- CHANGED: Check if the template was found
+                if tbbox:
+                    # Now, find the precise bounding box using contours within that rough area
                     x1, y1, x2, y2 = tbbox
-                    cx, cy = 0.5*(x1+x2), 0.5*(y1+y2)
-                    bbox = tbbox
-                    score = float(tscore)
-                    src = "template"
                     
-                    # ==== ย้ายการคำนวณและแสดงระยะทางมาไว้ที่นี่ ====
-                    w_px = x2 - x1
-                    h_px = y2 - y1
-                    if w_px > 0 and h_px > 0:
-                        dist = distant_by_cammara(w_px, h_px)
-
-            # 1B) Fallback: Marker SDK
-            if cx is None and len(markers) > 0:
-                x_px, y_px = markers[-1].center
-                w_px = markers[-1].pt2[0] - markers[-1].pt1[0]
-                h_px = markers[-1].pt2[1] - markers[-1].pt1[1]
-                cx, cy = x_px, y_px
-                bbox = (x_px - w_px//2, y_px - h_px//2, x_px + w_px//2, y_px + h_px//2)
-                score = 1.0
-                src = "marker"
-                # คำนวณระยะสำหรับ Marker ด้วย (เผื่อไว้)
-                if w_px > 0 and h_px > 0:
-                    dist = distant_by_cammara(w_px, h_px)
+                    # Create a Region of Interest (ROI) from the binary mask
+                    roi = binary_mask[y1:y2, x1:x2]
                     
-            # 1C) Largest Red Blob (ถูกปิดการใช้งานแล้ว)
-            # ... โค้ดส่วนนี้จะไม่ทำงานเพราะ USE_BLOB_FALLBACK = False ...
+                    # Find contours inside the ROI
+                    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    if contours:
+                        # Find the largest contour by area
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        
+                        # Only proceed if the contour is a reasonable size (to filter out noise)
+                        if cv2.contourArea(largest_contour) > MIN_CONTOUR_AREA:
+                            # Get the bounding box of the contour. IMPORTANT: these are coords RELATIVE to the ROI
+                            rx, ry, rw, rh = cv2.boundingRect(largest_contour)
+                            
+                            # Convert the relative ROI coordinates to absolute frame coordinates
+                            final_x1 = x1 + rx
+                            final_y1 = y1 + ry
+                            final_x2 = final_x1 + rw
+                            final_y2 = final_y1 + rh
+                            
+                            # <-- CHANGED: This is now our FINAL, tight-fitting bounding box
+                            bbox = (final_x1, final_y1, final_x2, final_y2)
+                            cx = final_x1 + rw / 2
+                            cy = final_y1 + rh / 2
+                            score = float(tscore)
+                            src = "template+contour"
+                            
+                            w_px, h_px = rw, rh
+                            if w_px > 0 and h_px > 0: dist = distant_by_cammara(w_px, h_px)
 
-            latest_bbox = bbox
-            latest_score = score
-            latest_src = src
+            if cx is None and markers:
+                m = markers[-1]
+                cx, cy, bbox = m.center[0], m.center[1], (m.pt1[0], m.pt1[1], m.pt2[0], m.pt2[1])
+                score, src = 1.0, "marker"
+                w_px, h_px = bbox[2]-bbox[0], bbox[3]-bbox[1]
+                if w_px > 0 and h_px > 0: dist = distant_by_cammara(w_px, h_px)
 
-            # 2) ควบคุม PID และสั่งงาน Gimbal
-            if bbox is not None and cx is not None:
+            latest_bbox, latest_score, latest_src = bbox, score, src
+
+            if bbox and cx:
                 if USE_EMA:
-                    ema_cx = EMA_ALPHA * cx + (1 - EMA_ALPHA) * ema_cx
-                    ema_cy = EMA_ALPHA * cy + (1 - EMA_ALPHA) * ema_cy
+                    ema_cx, ema_cy = (EMA_ALPHA*cx + (1-EMA_ALPHA)*ema_cx), (EMA_ALPHA*cy + (1-EMA_ALPHA)*ema_cy)
                     tgt_x, tgt_y = ema_cx, ema_cy
-                else:
-                    tgt_x, tgt_y = cx, cy
-
-                err_x = (tgt_x - CENTER_X)
-                err_y = (tgt_y - CENTER_Y)
-
-                u_yaw   = SIGN_YAW   * pid_yaw.step(err_x, t_now)
-                u_pitch = SIGN_PITCH * pid_pitch.step(err_y, t_now)
-
-                u_yaw   = clamp(u_yaw,   -MAX_SPEED, MAX_SPEED)
-                u_pitch = clamp(u_pitch, -MAX_SPEED, MAX_SPEED)
-
+                else: tgt_x, tgt_y = cx, cy
+                
+                err_x, err_y = (tgt_x - CENTER_X), (tgt_y - CENTER_Y)
+                u_yaw = clamp(SIGN_YAW * pid_yaw.step(err_x, t_now), -MAX_SPEED, MAX_SPEED)
+                u_pitch = clamp(SIGN_PITCH * pid_pitch.step(err_y, t_now), -MAX_SPEED, MAX_SPEED)
                 gim.drive_speed(pitch_speed=u_pitch, yaw_speed=u_yaw)
                 
-                pa, ya, _, _ = gimbal_angles
-                rows.append([t_now - t0, pa, ya, err_x, err_y, u_yaw, u_pitch, latest_score, latest_src])
+                rows.append([t_now-t0, gimbal_angles[0], gimbal_angles[1], err_x, err_y, u_yaw, u_pitch, score, src])
             else:
                 gim.drive_speed(pitch_speed=0, yaw_speed=0)
-                pid_yaw.reset()
-                pid_pitch.reset()
+                pid_yaw.reset(); pid_pitch.reset()
 
-            # 3) แสดงผล Debug
             dbg = frame.copy()
-            ema_pt = (ema_cx, ema_cy) if (bbox is not None and USE_EMA) else None
-            
-            # วาดข้อมูลทั่วไปก่อน
+            ema_pt = (ema_cx, ema_cy) if (bbox and USE_EMA) else None
             RedTemplateDetector.draw_debug(dbg, latest_bbox, latest_score, ema_pt, True, f"SRC: {latest_src}")
-            
-            # ถ้าเจอวัตถุ (ไม่ว่าจะจากแหล่งไหน) และคำนวณระยะได้ ให้แสดงผล
-            if bbox is not None and dist > 0:
-                dist_text = f"Distance: {dist:.2f} cm"
-                # แสดงผลใกล้ๆ กับ BBox
-                text_pos = (int(bbox[0]), int(bbox[1]) - 10)
-                cv2.putText(dbg, dist_text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            # หากต้องการวาดข้อมูลเฉพาะของ Marker SDK เพิ่มเติม (เช่น หมายเลข Marker)
-            if latest_src == "marker":
+            if bbox and dist > 0:
+                cv2.putText(dbg, f"Dist: {dist:.1f} cm", (int(bbox[0]), int(bbox[1])-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+            if src == "marker":
                 for m in markers:
-                    cv2.rectangle(dbg, m.pt1, m.pt2, (0, 255, 0), 2) # วาดกรอบเขียวทับ
+                    cv2.rectangle(dbg, m.pt1, m.pt2, (0, 255, 0), 2)
                     cv2.putText(dbg, str(m.text), m.center, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
 
-            cv2.imshow("Template-First PID", dbg)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
+            cv2.imshow("Template Pyramid PID", dbg)
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
     finally:
-        # ===== Cleanup & Save =====
-        try:
-            ep_vision.unsub_detect_info(name="marker") # ยกเลิก sub marker
-        except Exception:
-            pass
+        if 'ep' in locals() and ep.is_connected():
+            ep.close()
         cv2.destroyAllWindows()
-        try:
-            cam.stop_video_stream()
-        except Exception:
-            pass
-        gim.drive_speed(pitch_speed=0, yaw_speed=0)   # สั่งหยุดก่อนปิด
-        try:
-            gim.unsub_angle()
-        except Exception:
-            pass
-        ep.close()
-
-        # Save CSV
-        # out = Path("gimbal_response.csv")
-        # try:
-        #     with out.open('w', newline='') as f:
-        #         w = csv.writer(f)
-        #         w.writerow(["t","pitch_angle","yaw_angle","err_x_px","err_y_px","u_yaw_dps","u_pitch_dps","score","src"])
-        #         w.writerows(rows)
-        #     print(f"[LOG] Saved {len(rows)} samples → {out.resolve()}")
-        # except Exception as e:
-        #     print(f"[WARN] CSV not saved: {e}")
