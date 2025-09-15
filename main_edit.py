@@ -254,6 +254,14 @@ def sub_angle_cb(angle_info):
     """
     gimbal_angles[:] = angle_info
 
+def distant_by_cammara(px_x,px_y):
+    Kx = 741.176
+    Ky = 669.796
+    zx = Kx*5.1/px_x
+    zy = Ky*5.1/px_y
+    z = (zx**2 + zy**2)**0.5
+    return z
+
 # ===================== Main =====================
 if __name__ == "__main__":
     # โหลด template (ถ้ามีไฟล์)
@@ -370,6 +378,15 @@ if __name__ == "__main__":
                 for m in markers:
                     cv2.rectangle(dbg, m.pt1, m.pt2, (0,255,0), 2) # marker SDK → กรอบเขียว
                     cv2.putText(dbg, str(m.text), m.center, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+
+                    # ==== เพิ่มการคำนวณและแสดงระยะทาง ====
+                    w_px = m.pt2[0] - m.pt1[0]
+                    h_px = m.pt2[1] - m.pt1[1]
+                    if w_px > 0 and h_px > 0:  # กันหารศูนย์
+                        dist = distant_by_cammara(w_px, h_px)
+                        cv2.putText(dbg, f"Dist={dist:.2f}", (m.pt1[0], m.pt1[1]-10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
                 RedTemplateDetector.draw_debug(dbg, latest_bbox, latest_score, ema_pt, True, "SRC: marker")
             else:
                 # template / blob → วาดกรอบเหลืองจาก draw_debug
@@ -398,31 +415,12 @@ if __name__ == "__main__":
         ep.close()
 
         # Save CSV
-        out = Path("gimbal_response.csv")
-        try:
-            with out.open('w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(["t","pitch_angle","yaw_angle","err_x_px","err_y_px","u_yaw_dps","u_pitch_dps","score","src"])
-                w.writerows(rows)
-            print(f"[LOG] Saved {len(rows)} samples → {out.resolve()}")
-        except Exception as e:
-            print(f"[WARN] CSV not saved: {e}")
-
-        # ===== Optional Plot แบบตัวอย่าง =====
-        try:
-            import matplotlib.pyplot as plt
-            if len(rows) > 0:
-                xs = list(range(len(rows)))
-                e_x  = [r[3] for r in rows]
-                e_y  = [r[4] for r in rows]
-                u_x  = [r[5] for r in rows]  # u_yaw
-                u_y  = [r[6] for r in rows]  # u_pitch
-                plt.plot(xs, e_x)
-                plt.plot(xs, e_y)
-                plt.plot(xs, u_x)
-                plt.plot(xs, u_y)
-                plt.legend(["e x", "e y", "u x", "u y"])
-                plt.title("Errors and Control Commands")
-                plt.show()
-        except Exception as e:
-            print(f"[WARN] Plot skipped: {e}")
+        # out = Path("gimbal_response.csv")
+        # try:
+        #     with out.open('w', newline='') as f:
+        #         w = csv.writer(f)
+        #         w.writerow(["t","pitch_angle","yaw_angle","err_x_px","err_y_px","u_yaw_dps","u_pitch_dps","score","src"])
+        #         w.writerows(rows)
+        #     print(f"[LOG] Saved {len(rows)} samples → {out.resolve()}")
+        # except Exception as e:
+        #     print(f"[WARN] CSV not saved: {e}")
